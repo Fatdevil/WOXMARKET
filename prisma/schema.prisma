@@ -1,0 +1,320 @@
+// Voice Marketplace — Prisma Schema
+// Database: PostgreSQL
+// All models from PRD §11 + VoiceOwnershipConsent audit table
+
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ─── Users ────────────────────────────────────────────────────
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String?  @map("password_hash")
+  authProvider String?  @map("auth_provider")
+  displayName  String   @map("display_name")
+  country      String?
+  language     String   @default("en")
+  role             String   @default("buyer") // buyer, creator, admin
+  createdAt        DateTime @default(now()) @map("created_at")
+  stripeCustomerId String?  @unique @map("stripe_customer_id")
+  payoutStatus     String?  @map("payout_status")
+  kycStatus        String?  @map("kyc_status")
+
+  creatorProfile    CreatorProfile?
+  voices            Voice[]
+  trainingJobs      VoiceTrainingJob[]
+  subscriptions     Subscription[]
+  usageEvents       UsageEvent[]
+  payouts           Payout[]
+  reports           Report[]
+  ownershipConsents VoiceOwnershipConsent[]
+  generatedAudio    GeneratedAudio[]
+  creatorEarnings   CreatorEarning[]
+  payoutItems       CreatorPayoutItem[]
+
+  @@map("users")
+}
+
+// ─── Creator Profiles ─────────────────────────────────────────
+model CreatorProfile {
+  id                      String @id @default(cuid())
+  userId                  String @unique @map("user_id")
+  user                    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  bio                     String?
+  avatarUrl               String? @map("avatar_url")
+  publicProfileSlug       String? @unique @map("public_profile_slug")
+  payoutProviderAccountId String? @map("payout_provider_account_id") // Kept for legacy compatibility if any
+  revenueSharePercent     Float   @default(65.0) @map("revenue_share_percent")
+
+  // Stripe Connect fields
+  stripeAccountId         String? @map("stripe_account_id")
+  stripeConnectStatus     String? @map("stripe_connect_status") // 'not_started', 'pending', 'complete', 'restricted'
+  stripeOnboardedAt       DateTime? @map("stripe_onboarded_at")
+
+  @@map("creator_profiles")
+}
+
+// ─── Creator Earning Ledger ───────────────────────────────────
+model CreatorEarning {
+  id                 String   @id @default(cuid())
+  creatorUserId      String   @map("creator_user_id")
+  creator            User     @relation(fields: [creatorUserId], references: [id], onDelete: Cascade)
+
+  voiceId            String   @map("voice_id")
+  voice              Voice    @relation(fields: [voiceId], references: [id], onDelete: Cascade)
+
+  sourceType         String   @map("source_type") // "subscription" | "overage"
+  sourceReferenceId  String?  @map("source_reference_id") // stripe invoice line, subscription id, etc.
+
+  grossAmount        Int      @map("gross_amount")      // cents
+  creatorAmount      Int      @map("creator_amount")    // cents
+  platformAmount     Int      @map("platform_amount")   // cents
+  currency           String   @default("usd")
+
+  status             String   @default("pending") // pending | available | paid | failed
+  occurredAt         DateTime @default(now()) @map("occurred_at")
+  availableAt        DateTime? @map("available_at")
+  paidAt             DateTime? @map("paid_at")
+
+  metadata           String?  // optional JSON string
+  createdAt          DateTime @default(now()) @map("created_at")
+  
+  payoutBatchId      String?  @map("payout_batch_id")
+  payoutBatch        CreatorPayoutBatch? @relation(fields: [payoutBatchId], references: [id], onDelete: SetNull)
+
+  @@unique([sourceType, sourceReferenceId]) // Idempotency
+  @@index([creatorUserId])
+  @@map("creator_earnings")
+}
+
+// ─── Payout Batch Operations ──────────────────────────────────
+model CreatorPayoutBatch {
+  id          String   @id @default(cuid())
+  totalAmount Int      @map("total_amount") // cents
+  currency    String   @default("usd")
+  status      String   @default("draft") // draft, completed, failed
+  notes       String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  executedAt  DateTime? @map("executed_at")
+
+  items       CreatorPayoutItem[]
+  earnings    CreatorEarning[]
+
+  @@map("creator_payout_batches")
+}
+
+model CreatorPayoutItem {
+  id          String   @id @default(cuid())
+  batchId     String   @map("batch_id")
+  batch       CreatorPayoutBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  
+  creatorId   String   @map("creator_id")
+  creator     User     @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  totalAmount Int      @map("total_amount") // snapshot in cents
+  currency    String   @default("usd")
+  status      String   @default("pending") // pending | paid
+  createdAt   DateTime @default(now()) @map("created_at")
+  paidAt      DateTime? @map("paid_at")
+
+  @@map("creator_payout_items")
+}
+
+// ─── Voices ───────────────────────────────────────────────────
+model Voice {
+  id                String    @id @default(cuid())
+  creatorUserId     String    @map("creator_user_id")
+  creator           User      @relation(fields: [creatorUserId], references: [id], onDelete: Cascade)
+  title             String
+  description       String?
+  useCase           String?   @map("use_case") // Stored as JSON string representation of an array
+  tone              String?
+  enhancementPreset String?   @map("enhancement_preset")
+  language          String    @default("en")
+  category          String?
+  tags              String[]  // PostgreSQL native array
+  visibility        String    @default("private") // private, public, unlisted
+  priceType         String?   @map("price_type") // subscription, usage, both
+  subscriptionPrice Float?    @map("subscription_price")
+  usagePriceUnit    Float?    @map("usage_price_unit")
+  status            String    @default("draft") // draft, training, ready, failed, suspended
+  moderationStatus  String    @default("pending") @map("moderation_status") // pending, approved, rejected
+  moderationReason  String?   @map("moderation_reason")
+  submittedAt       DateTime? @map("submitted_at")
+  moderatedAt       DateTime? @map("moderated_at")
+  moderatedBy       String?   @map("moderated_by")
+  modelVersion      String?   @map("model_version")
+  previewUrl        String?   @map("preview_url")
+  createdAt         DateTime  @default(now()) @map("created_at")
+  publishedAt       DateTime? @map("published_at")
+
+  trainingJobs      VoiceTrainingJob[]
+  samples           VoiceSample[]
+  listing           Listing?
+  subscriptions     Subscription[]
+  usageEvents       UsageEvent[]
+  reports           Report[]
+  ownershipConsents VoiceOwnershipConsent[]
+  generatedAudio    GeneratedAudio[]
+  creatorEarnings   CreatorEarning[]
+
+  @@map("voices")
+}
+
+// ─── Voice Ownership Consent (audit) ──────────────────────────
+model VoiceOwnershipConsent {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  voiceId     String   @map("voice_id")
+  voice       Voice    @relation(fields: [voiceId], references: [id], onDelete: Cascade)
+  consentText String   @map("consent_text")
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
+  consentedAt DateTime @default(now()) @map("consented_at")
+
+  @@map("voice_ownership_consents")
+}
+
+// ─── Voice Training Jobs ──────────────────────────────────────
+model VoiceTrainingJob {
+  id                  String    @id @default(cuid())
+  voiceId             String    @map("voice_id")
+  voice               Voice     @relation(fields: [voiceId], references: [id], onDelete: Cascade)
+  userId              String    @map("user_id")
+  user                User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceAudioKey      String    @map("source_audio_key") // Strictly the R2 private object key
+  scriptType          String?   @map("script_type")
+  preprocessingStatus String    @default("pending") @map("preprocessing_status")
+  trainingStatus      String    @default("pending") @map("training_status")
+  startedAt           DateTime? @map("started_at")
+  completedAt         DateTime? @map("completed_at")
+  failureReason       String?   @map("failure_reason")
+
+  @@map("voice_training_jobs")
+}
+
+// ─── Voice Samples ────────────────────────────────────────────
+model VoiceSample {
+  id             String   @id @default(cuid())
+  voiceId        String   @map("voice_id")
+  voice          Voice    @relation(fields: [voiceId], references: [id], onDelete: Cascade)
+  sampleText     String   @map("sample_text")
+  sampleAudioUrl String   @map("sample_audio_url")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@map("voice_samples")
+}
+
+// ─── Listings ─────────────────────────────────────────────────
+model Listing {
+  id               String @id @default(cuid())
+  voiceId          String @unique @map("voice_id")
+  voice            Voice  @relation(fields: [voiceId], references: [id], onDelete: Cascade)
+  status           String @default("active")
+  featuredRank     Int?   @map("featured_rank")
+  moderationStatus String @default("pending") @map("moderation_status")
+  reportCount      Int    @default(0) @map("report_count")
+
+  @@map("listings")
+}
+
+// ─── Subscriptions ────────────────────────────────────────────
+model Subscription {
+  id                            String    @id @default(cuid())
+  buyerUserId                   String    @map("buyer_user_id")
+  buyer                         User      @relation(fields: [buyerUserId], references: [id], onDelete: Cascade)
+  voiceId                       String    @map("voice_id")
+  voice                         Voice     @relation(fields: [voiceId], references: [id], onDelete: Cascade)
+  billingProviderSubscriptionId String?   @map("billing_provider_subscription_id")
+  status                        String    @default("active")
+  stripeMeteredItemId           String?   @map("stripe_metered_item_id")
+  currentPeriodStart            DateTime? @map("current_period_start")
+  currentPeriodEnd              DateTime? @map("current_period_end")
+  startedAt                     DateTime  @default(now()) @map("started_at")
+  canceledAt                    DateTime? @map("canceled_at")
+
+  @@map("subscriptions")
+}
+
+// ─── Usage Events ─────────────────────────────────────────────
+model UsageEvent {
+  id          String   @id @default(cuid())
+  buyerUserId String   @map("buyer_user_id")
+  buyer       User     @relation(fields: [buyerUserId], references: [id], onDelete: Cascade)
+  voiceId     String   @map("voice_id")
+  voice       Voice    @relation(fields: [voiceId], references: [id], onDelete: Cascade)
+  eventType   String   @map("event_type")
+  usageAmount Float    @map("usage_amount")
+  unit        String
+  billingBucket String @default("included") @map("billing_bucket")
+  source      String   @default("preview") // preview, app, api
+  timestamp   DateTime @default(now())
+
+  @@index([voiceId, timestamp])
+  @@index([buyerUserId, timestamp])
+  @@map("usage_events")
+}
+
+// ─── Payouts ──────────────────────────────────────────────────
+model Payout {
+  id            String    @id @default(cuid())
+  creatorUserId String    @map("creator_user_id")
+  creator       User      @relation(fields: [creatorUserId], references: [id], onDelete: Cascade)
+  amountGross   Float     @map("amount_gross")
+  platformFee   Float     @map("platform_fee")
+  creatorNet    Float     @map("creator_net")
+  currency      String    @default("SEK")
+  status        String    @default("pending")
+  periodStart   DateTime  @map("period_start")
+  periodEnd     DateTime  @map("period_end")
+  payoutDate    DateTime? @map("payout_date")
+
+  @@map("payouts")
+}
+
+// ─── Reports ──────────────────────────────────────────────────
+model Report {
+  id             String    @id @default(cuid())
+  reporterUserId String    @map("reporter_user_id")
+  reporter       User      @relation(fields: [reporterUserId], references: [id], onDelete: Cascade)
+  targetVoiceId  String    @map("target_voice_id")
+  targetVoice    Voice     @relation(fields: [targetVoiceId], references: [id], onDelete: Cascade)
+  reason         String
+  description    String?
+  status         String    @default("open")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  resolvedAt     DateTime? @map("resolved_at")
+
+  @@map("reports")
+}
+model GeneratedAudio {
+  id         String   @id @default(cuid())
+  voiceId    String   @map("voice_id")
+  voice      Voice    @relation(fields: [voiceId], references: [id], onDelete: Cascade)
+  userId     String   @map("user_id")
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  storageKey String   @map("storage_key")
+  url        String   // Public URL for generated assets
+  characters Int
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@map("generated_audio")
+}
+
+// ─── Creator Invites (Growth Loop) ────────────────────────────
+model CreatorInvite {
+  id          String   @id @default(cuid())
+  inviterId   String   @map("inviter_id")
+  email       String
+  status      String   @default("pending") // 'pending', 'accepted'
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@unique([inviterId, email])
+  @@map("creator_invites")
+}
